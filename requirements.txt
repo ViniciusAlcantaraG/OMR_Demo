@@ -1,2 +1,7 @@
+torch
+torchvision
 gradio
 transformers
+accelerate
+bitsandbytes
+qwen-vl-utils

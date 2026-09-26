@@ -1,42 +1,66 @@
-import os
-import sys
 import gradio as gr
-from transformers import GenerationConfig, AutoProcessor
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'legato')))
+from transformers import GenerationConfig, AutoProcessor, BitsAndBytesConfig, Qwen3VLForConditionalGeneration, AutoModelForTextToWaveform
 from PIL import Image
-from legato.models import LegatoModel
 import torch
+
+quant_config = BitsAndBytesConfig(load_in_8bit=True)
 
 # Load model
 print("Loading model into memory...")
-model = LegatoModel.from_pretrained("guangyangmusic/legato-small")
-processor = AutoProcessor.from_pretrained("guangyangmusic/legato-small")
+model = Qwen3VLForConditionalGeneration.from_pretrained("Qwen/Qwen3-VL-2B-Instruct",
+                                                        quantization_config=quant_config,
+                                                        attn_implementation="sdpa",
+                                                        device_map="auto")
+processor = AutoProcessor.from_pretrained("Qwen/Qwen3-VL-2B-Instruct")
 
-# Loading model to GPU
-device = "cuda" if torch.cuda.is_available() else "cpu"
-model = model.to(device).half()
 print("Model sucessfully loaded!")
 
 def transcribe(image: Image.Image) -> str:
-    """Transforms an image of sheet music into a string in ABC notation.
-    We use the model Legato-Small to perform Optical Music Recognition on our image"""
+    """Extracts the chords and information about the song from an image of sheet music 
+        using the Qwen3-VL-2B-Instruct model."""
 
-    inputs = processor(images=image, return_tensors="pt")
-    inputs = {k: v.to(device) for k, v in inputs.items()}
-
-    if "pixel_values" in inputs: 
-        inputs["pixel_values"] = inputs["pixel_values"].half()
-
-    generation_config = GenerationConfig(max_length=2028,
-                        num_beams=10,
-                        repetition_penalty=1.1)
-
+    prompt = "Extract time signature and tempo marking from the sheet music. Output this metadata along with the sequence of chords."
+    
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image"},
+                {"type": "text", "text": prompt}
+            ]
+        }
+    ]
+    
+    # We use the chat template to interact with the model
+    text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    
+    # Process the text and image together
+    inputs = processor(
+        text=[text], 
+        images=[image], 
+        padding=True, 
+        return_tensors="pt"
+    ).to("cuda")
+    
+    # Generate the output
     with torch.no_grad():
-        output = model.generate(**inputs, generation_config=generation_config)
+        output_ids = model.generate(**inputs, max_new_tokens=1024, repetition_penalty=1.15)
+        
+    # Get the newly generated tokens
+    generated_ids = [
+        out_ids[len(in_ids):] 
+        for in_ids, out_ids in zip(inputs.input_ids, output_ids)
+    ]
+    
+    song_info = processor.batch_decode(
+        generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=True)[0]
+    
+    return song_info
 
-    abc_notation = processor.batch_decode(output, skip_special_tokens=True)[0]
+#TODO
+#def generate_song(song_info: str):
 
-    return abc_notation
+
 
     
 demo = gr.Interface(fn=transcribe,
